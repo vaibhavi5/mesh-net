@@ -180,7 +180,7 @@ class MeshNet(nn.Module):
             )
 
         if fat is not None:
-            chn = int(channels*1.5)
+            chn = int(channels * 1.5)
             if fat in {"i", "io"}:
                 config["layers"][0]["out_channels"] = chn
                 config["layers"][1]["in_channels"] = chn
@@ -190,7 +190,7 @@ class MeshNet(nn.Module):
             if fat == "b":
                 config["layers"][3]["out_channels"] = chn
                 config["layers"][4]["in_channels"] = chn
-                
+
         super(MeshNet, self).__init__()
 
         layers = [
@@ -202,7 +202,7 @@ class MeshNet(nn.Module):
             )
             for block_kwargs in config["layers"]
         ]
-        #layers[-1] = SequentialConvLayer(layers[-1][0].in_channels, layers[-1][0].out_channels)
+        # layers[-1] = SequentialConvLayer(layers[-1][0].in_channels, layers[-1][0].out_channels)
         layers[-1] = layers[-1][0]
         self.model = nn.Sequential(*layers)
         init_weights(self.model)
@@ -234,7 +234,6 @@ class enMesh_checkpoint(MeshNet):
             return self.train_forward(x)
         else:
             return self.eval_forward(x)
-
 
 class enMesh(MeshNet):
     def __init__(
@@ -420,243 +419,6 @@ class enMesh(MeshNet):
 
         return lss_value, y_hat
 
-
-class MeshNet_fad(MeshNet):
-    """MeshNet with forward AD"""
-
-    def __init__(self, in_channels, n_classes, channels, config_file):
-        """Init"""
-        super(MeshNet_fad, self).__init__(
-            in_channels, n_classes, channels, config_file
-        )
-        self.loss = nn.CrossEntropyLoss(reduction="mean")
-        (
-            self.loss_func,
-            self.loss_params,
-            self.loss_buffers,
-        ) = make_functional_with_buffers(
-            self.loss, disable_autograd_tracking=True
-        )
-
-    def eval_forward(self, x):
-        """Forward pass"""
-        with torch.inference_mode():
-            for i, layer in enumerate(self.model):
-                x = layer(x)
-        return x
-
-    def forward(self, x, y=None, loss=None, verbose=False):
-        if self.training:
-            return self.forwardforward(x)
-        else:
-            return self.eval_forward(x)
-
-    def layergrads(self, layer, dotrain):
-        for param in layer.parameters():
-            param.requires_grad = dotrain
-            param.grad = None
-
-    def forwardforward(self, x, y):
-        x.requires_grad = False
-        grads = {}
-        jvps = None
-        for idx, layer in enumerate(self.model):
-            func, params, buffers = make_functional_with_buffers(
-                layer, disable_autograd_tracking=True
-            )
-
-            def func_params_only(params):
-                return func(params, buffers, x)
-
-            def func_values_only(x):
-                return func(params, buffers, x)
-
-            def f(x, tangent):
-                return torch.func.jvp(func_values_only, (x,), (tangent,))
-
-            # Create random vector from spherical Gaussian normalized to length 1
-            tangents = tuple(
-                [
-                    v / v.norm()
-                    for p in params
-                    for v in [torch.randn_like(p, requires_grad=False)]
-                ]
-            )
-            for p, g in zip(layer.parameters(), tangents):
-                p.grad = g
-            # Compute layer output
-            output, jvp_out = torch.func.jvp(
-                func_params_only, (params,), (tangents,)
-            )
-            output.detach()
-            jvp_out.detach()
-
-            jvp_out = torch.unsqueeze(jvp_out, dim=0)
-            if jvps is not None:
-                newout, jacs = torch.func.vmap(f)(
-                    torch.stack((x,) * jvps.shape[0]), jvps
-                )
-                jvps = torch.cat((jacs, jvp_out), 0)
-                del jacs
-                del newout
-                del jvp_out
-            else:
-                jvps = jvp_out
-                jvps.detach()
-                del jvp_out
-
-            x = output
-            del output
-            del func
-            del params
-            del buffers
-
-        def loss_values_only(x):
-            return self.loss_func(self.loss_params, self.loss_buffers, x, y)
-
-        def loss_f(x, tangent):
-            return torch.func.jvp(loss_values_only, (x,), (tangent,))
-
-        newout, jacs = torch.func.vmap(loss_f)(
-            torch.stack((x,) * jvps.shape[0]), jvps
-        )
-        for layer, jvps in zip(self.model, jacs):
-            for p in layer.parameters():
-                p.grad *= jvps
-        del jacs
-        del newout
-        del x
-        # gc.collect()
-        # torch.cuda.empty_cache()
-        print("final:   ", torch.cuda.memory_allocated())
-        return True
-
-
-class bpfreeMesh(MeshNet):
-    """ """
-
-    def __init__(
-        self, in_channels, n_classes, channels, config_file, samples=10
-    ):
-        """Init"""
-        super(bpfreeMesh, self).__init__(
-            in_channels, n_classes, channels, config_file
-        )
-        self.samples = samples
-        self.loss = nn.CrossEntropyLoss(reduction="mean")
-        (
-            self.loss_func,
-            self.loss_params,
-            self.loss_buffers,
-        ) = make_functional_with_buffers(
-            self.loss, disable_autograd_tracking=True
-        )
-
-    def eval_forward(self, x):
-        """Forward evaluation pass"""
-        with torch.inference_mode():
-            for i, layer in enumerate(self.model):
-                x = layer(x)
-        return x
-
-    def forward(self, x, y=None, loss=None, verbose=False):
-        if self.training:
-            return self.forwardforward(x)
-        else:
-            return self.eval_forward(x)
-
-    def layergrads(self, layer, dotrain):
-        for param in layer.parameters():
-            param.requires_grad = dotrain
-            param.grad = None
-
-    def forwardforward(self, x, y):
-        x.requires_grad = False
-        grads = {}
-        jvps = None
-        for idx, layer in enumerate(self.model):
-            func, params, buffers = make_functional_with_buffers(
-                layer, disable_autograd_tracking=True
-            )
-
-            def func_params_only(params):
-                return func(params, buffers, x)
-
-            def p(x, tangent):
-                return torch.func.jvp(func_params_only, (x,), (tangent,))
-
-            def func_values_only(x):
-                return func(params, buffers, x)
-
-            def f(x, tangent):
-                return torch.func.jvp(func_values_only, (x,), (tangent,))
-
-            # Create random vector from spherical Gaussian N(0,1)
-            tangents = tuple(
-                [
-                    v
-                    for p in params
-                    for v in [
-                        torch.randn(self.samples, *p.shape, requires_grad=False)
-                    ]
-                ]
-            )
-
-            # Compute layer output at all samples
-            output, params_tangents = torch.func.vmap(p)(
-                (x.repeat(self.samples, 1) for x in params), tangents
-            )
-            print("output shape: ", output.shape)
-            print("params shape: ", params_tangents.shape)
-
-            output.detach()
-            params_tangents.detach()
-
-            jvp_out = torch.unsqueeze(jvp_out, dim=0)
-            if jvps is not None:
-                newout, jacs = torch.func.vmap(f)(
-                    torch.stack((x,) * jvps.shape[0]), jvps
-                )
-                jvps = torch.cat((jacs, jvp_out), 0)
-                del jacs
-                del newout
-                del jvp_out
-            else:
-                jvps = jvp_out
-                jvps.detach()
-                del jvp_out
-
-            x = output
-            del output
-            del func
-            del params
-            del buffers
-
-        def loss_values_only(x):
-            return self.loss_func(self.loss_params, self.loss_buffers, x, y)
-
-        def loss_f(x, tangent):
-            return torch.func.jvp(loss_values_only, (x,), (tangent,))
-
-        newout, jacs = torch.func.vmap(loss_f)(
-            torch.stack((x,) * jvps.shape[0]), jvps
-        )
-        for layer, jvps in zip(self.model, jacs):
-            for p in layer.parameters():
-                p.grad *= jvps
-        del jacs
-        del newout
-        del x
-        # gc.collect()
-        # torch.cuda.empty_cache()
-        print("final:   ", torch.cuda.memory_allocated())
-        return True
-
-
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters())  # if p.requires_grad)
-
-
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -666,24 +428,13 @@ if __name__ == "__main__":
     batch = 1
     config_file = "modelAE.json"
 
-    # emodel = bpfreeMesh(1, classes, channels, config_file).to(device)
     emodel = enMesh_checkpoint(1, classes, channels, config_file).to(device)
-    # emodel = torch.compile(emodel)
-
-    num_params = count_parameters(emodel)
-    print(f"Number of parameters: {num_params}")
 
     x = torch.rand(batch, 1, *(cubesize,) * 3, requires_grad=False).to(device)
     y = torch.randint(
         0, classes, (batch, *(cubesize,) * 3), requires_grad=False
     ).to(device)
-    # model.eval()
-    # t0 = time.time()
-    # for i in range(10):
-    # r = model.forwardforward(x, y)
-    #    r = model.forward(x)
-    # t1 = time.time()
-    # print(t1-t0)
+
     print("enmesh")
     from blendbatchnorm import fuse_bn_recursively
 
@@ -691,14 +442,10 @@ if __name__ == "__main__":
     criterion = torch.nn.CrossEntropyLoss()
     emodel.train(False)
     t0 = time.time()
-    # x.requires_grad = True
-    # with torch.no_grad():
     with torch.inference_mode():
         for i in range(10):
-            r = emodel.forward(x) #forwardforward(x, y)
+            r = emodel.forward(x)
             del r
             torch.cuda.empty_cache()
-        # loss = criterion(r, y)
-        # loss.backward()
     t1 = time.time()
     print(t1 - t0)
